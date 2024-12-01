@@ -1,165 +1,124 @@
 import java.util.List;
-import java.util.Random; 
-import java.util.concurrent.atomic.AtomicBoolean; 
-import java.util.Stack;
-import java.util.concurrent.locks.Lock;
-import java.util.concurrent.locks.ReentrantLock;
-import java.util.concurrent.locks.Condition;
-import java.util.ArrayList;
+import java.util.Random;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * Player class represents a player in the card game.
- * Handles drawing, discarding cards, and checking win conditions in a multithreaded environment.
- */
 public class Player implements Runnable {
-    private int playerID;
-    private int preferredDenomination;
-    private List<Integer> hand;
-    private Stack<Integer> leftDeck;
-    private Stack<Integer> rightDeck;
-    private CardGame game;
-    private int n;
-    private AtomicBoolean gameWon;
-    private Random random = new Random();
-    private final Lock lock = new ReentrantLock();
-    private final Condition notEmpty = lock.newCondition();
+    private final int playerID;
+    private final List<Integer> hand;
+    private final ConcurrentLinkedQueue<Integer> ownDeck;
+    private final ConcurrentLinkedQueue<Integer> nextDeck;
+    private final CardGame game;
+    private final AtomicBoolean gameWon;
+    private final Random random = new Random();
+    private final int preferredDenomination; // Player's preferred denomination
 
-    public Player(int playerID, List<Integer> hand, List<Integer> deck, Stack<Integer> leftDeck, Stack<Integer> rightDeck, CardGame game, int n, AtomicBoolean gameWon) {
+    public Player(int playerID, List<Integer> hand, ConcurrentLinkedQueue<Integer> ownDeck,
+                  ConcurrentLinkedQueue<Integer> nextDeck, CardGame game, AtomicBoolean gameWon) {
         this.playerID = playerID;
         this.hand = hand;
-        this.preferredDenomination = playerID; // Set preferred denomination to player ID
-        this.leftDeck = leftDeck;
-        this.rightDeck = rightDeck;
+        this.ownDeck = ownDeck;
+        this.nextDeck = nextDeck;
         this.game = game;
-        this.n = n;
         this.gameWon = gameWon;
-
-        // Log and print initial hand
-        String initialHand = "Player " + (playerID + 1) + " initial hand: " + formatHand();
-        System.out.println(initialHand);
-        game.writePlayerFile(playerID, initialHand);
+        this.preferredDenomination = playerID + 1; // Preferred denomination is index + 1
     }
 
-    // Draws a card from the left deck, waiting if necessary
-    private Integer drawCard() throws InterruptedException {
-        lock.lock();
-        try {
-            while (leftDeck.isEmpty() && !gameWon.get()) {
-                notEmpty.await();
-            }
-            if (!gameWon.get() && !leftDeck.isEmpty()) {
-                Integer drawnCard = leftDeck.pop();
-                hand.add(drawnCard);
-                return drawnCard;
-            }
-            return null;
-        } finally {
-            lock.unlock();
+    /**
+     * Draws a card from the player's deck and logs it.
+     */
+    private Integer drawCard() {
+        Integer drawnCard = ownDeck.poll();
+        if (drawnCard != null) {
+            hand.add(drawnCard);
+            String message = "Player " + (playerID + 1) + " draws " + drawnCard + " from Deck " + (playerID + 1);
+            System.out.println(message);
+            game.writePlayerFile(playerID, message);
         }
+        return drawnCard;
     }
 
-    // Discards a random non-preferred card to the right deck
-    private Integer discardCard() {
-        lock.lock();
-        try {
-            if (hand.isEmpty()) {
-                return null; // No cards to discard
-            }
+    /**
+     * Discards a card (if available) that is not the preferred card and logs it.
+     */
+    private void discardCard() {
+        if (hand.isEmpty()) {
+            String message = "Player " + (playerID + 1) + " has no cards to discard.";
+            System.out.println(message);
+            game.writePlayerFile(playerID, message);
+            return;
+        }
 
-            // Filter cards to find non-preferred ones
-            List<Integer> nonPreferredCards = new ArrayList<>();
-            for (Integer card : hand) {
-                if (card != preferredDenomination) {
-                    nonPreferredCards.add(card);
-                }
-            }
+        // Filter hand to find a card that is NOT the preferred denomination
+        List<Integer> nonPreferredCards = hand.stream()
+                                              .filter(card -> card != preferredDenomination)
+                                              .toList();
 
-            // If no non-preferred cards are found, player has a full preferred hand
-            if (nonPreferredCards.isEmpty()) {
-                return null;
-            }
-
-            // Randomly discard a card from the non-preferred list
+        if (!nonPreferredCards.isEmpty()) {
             Integer discardedCard = nonPreferredCards.get(random.nextInt(nonPreferredCards.size()));
             hand.remove(discardedCard);
-            rightDeck.push(discardedCard);
-            notEmpty.signalAll(); // Notify waiting threads
-            return discardedCard;
-        } finally {
-            lock.unlock();
+            nextDeck.offer(discardedCard);
+
+            String message = "Player " + (playerID + 1) + " discards " + discardedCard + " to Deck " + ((playerID + 1) % game.n + 1);
+            System.out.println(message);
+            game.writePlayerFile(playerID, message);
+        } else {
+            // No available card to discard, skip discard
+            String message = "Player " + (playerID + 1) + " has only preferred cards and skips discard.";
+            System.out.println(message);
+            game.writePlayerFile(playerID, message);
         }
     }
 
-    // Checks if the player has a winning hand
+    /**
+     * Checks if the player has won and logs it if true.
+     */
     private boolean winner() {
-        if (hand.size() != 4) {
-            return false; // A valid hand must have exactly 4 cards
+        boolean hasWon = hand.size() == 4 && hand.stream().distinct().count() == 1;
+        if (hasWon) {
+            String message = "Player " + (playerID + 1) + " wins with hand: " + hand;
+            System.out.println(message);
+            game.writePlayerFile(playerID, message);
+            gameWon.set(true);
         }
-        int firstCard = hand.get(0); // Get the first card in the hand
-        for (int card : hand) {
-            if (card != firstCard) {
-                return false; // If any card is different, the player is not a winner
-            }
-        }
-        return true; // All cards are the same
+        return hasWon;
     }
 
-    // Formats the player's hand for logging
-    private String formatHand() {
-        return hand.toString();
+    /**
+     * Executes the player's turn, drawing, discarding, and checking for a win.
+     */
+    private void playTurn() {
+        drawCard();
+        discardCard();
+        game.logCurrentHand(playerID, hand); // Log current hand state
+        winner();
     }
 
-    // Executes the player's draw and discard actions
-    private void drawAndDiscard() throws InterruptedException {
-        // Perform the draw action
-        Integer drawnCard = drawCard();
-        if (drawnCard != null) {
-            String drawMessage = "Player " + (playerID + 1) + " draws " + drawnCard + " from deck " + (playerID + 1);
-            System.out.println(drawMessage); 
-            game.writePlayerFile(playerID, drawMessage);
-        }
-
-        // Perform the discard action
-        Integer discardedCard = discardCard();
-        if (discardedCard != null) {
-            String discardMessage = "Player " + (playerID + 1) + " discards " + discardedCard + " to deck " + ((playerID + 1) % n + 1);
-            System.out.println(discardMessage); 
-            game.writePlayerFile(playerID, discardMessage);
-            game.logCurrentHand(playerID, hand); // Log the current hand after discarding
-
-            // Check for a win after discarding
-            if (winner()) {
-                String winMessage = "Player " + (playerID + 1) + " wins!";
-                System.out.println(winMessage); // Print to console
-                game.writePlayerFile(playerID, winMessage);
-                gameWon.set(true);
-            }
-
-        }
-    }
-
-    // The player's main execution loop
     @Override
     public void run() {
         while (!gameWon.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                drawAndDiscard();
+                playTurn();
+                Thread.sleep(100); // Simulate gameplay pace
             } catch (InterruptedException e) {
-                Thread.currentThread().interrupt(); // Gracefully handle interruption
-                break;
+                Thread.currentThread().interrupt();
+                String message = "Player " + (playerID + 1) + " was interrupted.";
+                System.out.println(message);
+                game.writePlayerFile(playerID, message);
             }
         }
 
-        // Final logging for this player
+        // Final logging when the game ends
         if (gameWon.get()) {
-            String finalMessage;
-            if (winner()) {
-                finalMessage = "Player " + (playerID + 1) + " wins! Final hand: " + formatHand();
-            } else {
-                finalMessage = "Player " + (playerID + 1) + " exits after another player's win. Final hand: " + formatHand();
-            }
-            System.out.println(finalMessage); // Print to console
-            game.writePlayerFile(playerID, finalMessage);
+            String message = "Player " + (playerID + 1) + " exits after the game ends.";
+            System.out.println(message);
+            game.writePlayerFile(playerID, message);
+
+            String finalHandMessage = "Final hand of player " + (playerID +1) + ": " + hand;
+            System.out.println(finalHandMessage);
+            game.writePlayerFile(playerID, finalHandMessage);
         }
     }
 }
+
+

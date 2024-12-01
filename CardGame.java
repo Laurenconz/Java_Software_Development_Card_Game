@@ -1,116 +1,93 @@
-import java.util.Scanner;
-import java.io.File;
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.BufferedWriter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Stack;
+import java.io.*;
+import java.util.*;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/**
- * CardGame class. Handles the initialization and execution of a multiplayer card game.
- */
 public class CardGame {
 
-    private int n; // Number of players
-    private String packFilePath; // Path to the pack file
+    public final int n; // Number of players
+    private final String packFilePath; // Path to the pack file
+    private final AtomicBoolean gameWon = new AtomicBoolean(false); // Tracks game status
+    private final List<ConcurrentLinkedQueue<Integer>> sharedDecks = new ArrayList<>();
 
     public CardGame(int n, String packFilePath) {
         this.n = n;
         this.packFilePath = packFilePath;
+
+        // Initialize shared decks for cyclic sharing
+        for (int i = 0; i < n; i++) {
+            sharedDecks.add(new ConcurrentLinkedQueue<>());
+        }
     }
 
-    // Main method: tries command line, plays the game
     public static void main(String[] args) {
         try (Scanner scanner = new Scanner(System.in)) {
             System.out.print("Enter the number of players: ");
             int n = scanner.nextInt();
             scanner.nextLine(); // Consume newline character
 
+            if (n <= 1) {
+                System.err.println("Number of players must be greater than 1.");
+                return;
+            }
+
             System.out.print("Enter the pack file path: ");
             String packFilePath = scanner.nextLine();
+
+            File file = new File(packFilePath);
+            if (!file.exists() || !file.isFile()) {
+                System.err.println("Pack file does not exist or is not valid.");
+                return;
+            }
 
             CardGame game = new CardGame(n, packFilePath);
             game.startGame(); // Start the game
         }
     }
-
-    // Unified method for writing to a file
-    private void writeToFile(String fileName, String content) {
-        try (BufferedWriter writer = new BufferedWriter(new FileWriter(fileName, true))) {
-            writer.write(content);
-            writer.newLine();
-        } catch (IOException e) {
-            System.err.println("Error writing to file " + fileName + ": " + e.getMessage());
-        }
-    }
-
-    // Writes output to a player file
-    public void writePlayerFile(int playerIndex, String content) {
-        String fileName = "player" + (playerIndex + 1) + "_output.txt";
-        writeToFile(fileName, content);
-    }
-
-    // Logs the current state of a player's hand
     public void logCurrentHand(int playerIndex, List<Integer> hand) {
-        String content = "Current hand for player " + (playerIndex + 1) + ": " + hand.toString();
+        String content = "Current hand for player " + (playerIndex + 1) + ": " + hand;
+        
+        // Print to console
         System.out.println(content);
+        
+        // Write to player's file
         writePlayerFile(playerIndex, content);
     }
-
-    // Logs final deck states
-    public void logFinalDecks(List<List<Integer>> decks) {
-        for (int i = 0; i < decks.size(); i++) {
-            StringBuilder content = new StringBuilder("Final contents of deck " + (i + 1) + ": ");
-            for (Integer card : decks.get(i)) {
-                content.append(card).append(" ");
-            }
-            writeToFile("deck" + (i + 1) + "_output.txt", content.toString());
-        }
-    }
-
-    // Playing game method: initializes pack, cards, players, decks, and handles gameplay
+    
     public void startGame() {
-        while (true) {
-            try {
-                List<Integer> cards = loadPackFile();
-                int expectedCardCount = 8 * n;
-                if (cards.size() != expectedCardCount) {
-                    throw new IOException("Invalid number of cards. The pack must contain exactly " + expectedCardCount + " cards.");
-                }
+        clearOutputFiles();
 
-                System.out.println("Pack successfully loaded with " + cards.size() + " cards.");
-
-                // Distribute cards into player hands and decks
-                List<List<Integer>> hands = distributeHands(cards);
-                List<List<Integer>> decks = distributeDecks(cards);
-
-                // Check for immediate win
-                for (int i = 0; i < n; i++) {
-                    if (immediateWin(hands.get(i))) {
-                        System.out.println("Player " + (i + 1) + " Wins!");
-                        writePlayerFile(i, "Player " + (i + 1) + " wins with an immediate win!");
-                        logFinalDecks(decks);
-                        return;
-                    }
-                }
-
-                // Run the main game loop
-                boolean gameWon = runGame(hands, decks);
-                if (gameWon) {
-                    logFinalDecks(decks); // Ensure decks are logged after the game ends
-                    return;
-                }
-
-            } catch (IOException e) {
-                System.err.println("Error: " + e.getMessage());
-                System.out.println("Restarting game due to error...");
+        try {
+            List<Integer> cards = loadPackFile();
+            int expectedCardCount = 8 * n;
+            if (cards.size() != expectedCardCount) {
+                throw new IOException("Invalid number of cards. The pack must contain exactly " + expectedCardCount + " cards.");
             }
+
+            // Distribute hands and initialize shared decks
+            List<List<Integer>> playerHands = distributeHands(cards);
+            initializeSharedDecks(cards);
+
+            // Display initial hands and decks
+            displayInitialHandsAndDecks(playerHands);
+
+            // Check for immediate win condition
+            for (int i = 0; i < n; i++) {
+                if (immediateWin(playerHands.get(i))) {
+                    System.out.println("Player " + (i + 1) + " immediately wins!");
+                    writePlayerFile(i, "Player " + (i + 1) + " wins with an immediate win!");
+                    gameWon.set(true);
+                }
+            }
+
+            // Start the game
+            runGame(playerHands);
+
+        } catch (IOException e) {
+            System.err.println("Error: " + e.getMessage());
         }
     }
 
-    // Loads the pack file and validates its contents
     private List<Integer> loadPackFile() throws IOException {
         List<Integer> cards = new ArrayList<>();
         try (Scanner scanfile = new Scanner(new File(packFilePath))) {
@@ -125,77 +102,73 @@ public class CardGame {
         return cards;
     }
 
-    // Distributes cards into player hands
-    public List<List<Integer>> distributeHands(List<Integer> cards) {
+    private List<List<Integer>> distributeHands(List<Integer> cards) {
         List<List<Integer>> playerHands = new ArrayList<>();
+
+        // Initialize hands
         for (int i = 0; i < n; i++) {
             playerHands.add(new ArrayList<>());
         }
 
+        // Distribute first 4 * n cards to player hands
         for (int i = 0; i < 4 * n; i++) {
             int playerIndex = i % n;
             playerHands.get(playerIndex).add(cards.get(i));
         }
 
-        cards.subList(0, 4 * n).clear(); // Remove cards dealt to hands
+        // Remove distributed cards from the pack
+        cards.subList(0, 4 * n).clear();
+
         return playerHands;
     }
 
-    // Distributes remaining cards into decks
-    public List<List<Integer>> distributeDecks(List<Integer> cards) {
-        List<List<Integer>> decks = new ArrayList<>();
-        for (int i = 0; i < n; i++) {
-            decks.add(new ArrayList<>());
-        }
-
+    private void initializeSharedDecks(List<Integer> cards) {
+        // Distribute remaining cards to shared decks in a cyclic manner
         for (int i = 0; i < cards.size(); i++) {
-            int playerIndex = i % n;
-            decks.get(playerIndex).add(cards.get(i));
+            int deckIndex = i % n;
+            sharedDecks.get(deckIndex).offer(cards.get(i));
         }
-        return decks;
     }
 
-    // Checks for an immediate win condition
+    private void displayInitialHandsAndDecks(List<List<Integer>> playerHands) {
+        System.out.println("Initial Hands:");
+        for (int i = 0; i < playerHands.size(); i++) {
+            System.out.println("Player " + (i + 1) + ": " + playerHands.get(i));
+        }
+
+        
+    }
+
     public boolean immediateWin(List<Integer> playerHand) {
         return playerHand.size() == 4 && playerHand.stream().distinct().count() == 1;
     }
 
-    // Runs the main game loop
-    private boolean runGame(List<List<Integer>> hands, List<List<Integer>> decks) {
+    private void runGame(List<List<Integer>> hands) {
         List<Thread> playerThreads = new ArrayList<>();
-        AtomicBoolean gameWon = new AtomicBoolean(false);
 
-        // Initialize and start threads for players
         for (int i = 0; i < n; i++) {
-            Stack<Integer> leftDeck = new Stack<>();
-            Stack<Integer> rightDeck = new Stack<>();
-
-            leftDeck.addAll(decks.get((i - 1 + n) % n));
-            rightDeck.addAll(decks.get((i + 1) % n));
-
-            Player player = new Player(i, hands.get(i), decks.get(i), leftDeck, rightDeck, this, n, gameWon);
+            int nextDeckIndex = (i + 1) % n; // Each player shares a deck with the next player
+            Player player = new Player(i, hands.get(i), sharedDecks.get(i), sharedDecks.get(nextDeckIndex), this, gameWon);
             Thread playerThread = new Thread(player);
             playerThreads.add(playerThread);
             playerThread.start();
 
             writePlayerFile(i, "Starting hand for player " + (i + 1) + ": " + hands.get(i));
-            logCurrentHand(i, hands.get(i));
         }
 
-        // Monitor game status
+        // Wait for a winner to be declared
         while (!gameWon.get()) {
             try {
-                Thread.sleep(100);
+                Thread.sleep(100); // Small delay for main thread
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                System.err.println("Main game loop interrupted.");
                 break;
             }
         }
 
-        // Interrupt and join all threads
+        // Stop all player threads after a winner is found
         for (Thread thread : playerThreads) {
-            if (thread.isAlive()) thread.interrupt();
+            thread.interrupt();
         }
 
         for (Thread thread : playerThreads) {
@@ -203,10 +176,45 @@ public class CardGame {
                 thread.join();
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                System.err.println("Thread interrupted while waiting for termination: " + e.getMessage());
             }
         }
 
-        return gameWon.get();
+        // Output final deck states
+        writeFinalDecks();
+
+        System.out.println("Game over!");
+    }
+
+    private void clearOutputFiles() {
+        for (int i = 0; i < n; i++) {
+            String playerFileName = "player" + (i + 1) + "_output.txt";
+            String deckFileName = "deck" + (i + 1) + "_output.txt";
+            new File(playerFileName).delete();
+            new File(deckFileName).delete();
+        }
+    }
+
+    public void writePlayerFile(int playerIndex, String content) {
+        String fileName = "player" + (playerIndex + 1) + "_output.txt";
+
+        try (BufferedWriter writer = new BufferedWriter(new FileWriter(fileName, true))) {
+            writer.write(content);
+            writer.newLine();
+        } catch (IOException e) {
+            System.err.println("Error writing to file " + fileName + ": " + e.getMessage());
+        }
+    }
+
+    private void writeFinalDecks() {
+        for (int i = 0; i < n; i++) {
+            String fileName = "deck" + (i + 1) + "_output.txt";
+            List<Integer> finalDeck = new ArrayList<>(sharedDecks.get(i));
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(fileName))) {
+                writer.write("Final Deck " + (i + 1) + ": " + finalDeck);
+                writer.newLine();
+            } catch (IOException e) {
+                System.err.println("Error writing final deck to file " + fileName + ": " + e.getMessage());
+            }
+        }
     }
 }

@@ -23,6 +23,10 @@ public class Card {
         this.faceValue = faceValue;
     }
 
+    
+    /** 
+     * @return int
+     */
     public int getFaceValue() {
         return faceValue;
     }
